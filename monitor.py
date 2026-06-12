@@ -103,7 +103,7 @@ async def _fetch_threads_posts(username):
                 url = response.url
                 ct = response.headers.get("content-type", "")
                 # threads.net 관련 응답만 출력
-                if "threads.net" in url or "instagram.com" in url:
+                if "threads.net" in url or "threads.com" in url or "instagram.com" in url:
                     print(f"  [응답] {response.status} | {ct[:40]} | {url[:90]}")
                 if "json" in ct:
                     body = await response.body()
@@ -120,7 +120,7 @@ async def _fetch_threads_posts(username):
 
         try:
             await page.goto(
-                f"https://www.threads.net/@{username}",
+                f"https://www.threads.com/@{username}",
                 wait_until="domcontentloaded",
                 timeout=30000,
             )
@@ -195,9 +195,9 @@ def _find_posts_in_data(data, username, _depth=0):
                     "id": pk,
                     "text": text,
                     "url": (
-                        f"https://www.threads.net/@{username}/post/{code}"
+                        f"https://www.threads.com/@{username}/post/{code}"
                         if code
-                        else f"https://www.threads.net/@{username}"
+                        else f"https://www.threads.com/@{username}"
                     ),
                     "created_at": taken_at,
                 })
@@ -229,9 +229,9 @@ def _find_posts_in_html(html, username):
                         "id": pk,
                         "text": text,
                         "url": (
-                            f"https://www.threads.net/@{username}/post/{code}"
+                            f"https://www.threads.com/@{username}/post/{code}"
                             if code
-                            else f"https://www.threads.net/@{username}"
+                            else f"https://www.threads.com/@{username}"
                         ),
                         "created_at": taken_at,
                     })
