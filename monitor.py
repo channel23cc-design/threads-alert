@@ -67,18 +67,52 @@ async def _fetch_threads_posts(username):
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                # 봇 감지 우회: webdriver 플래그 숨기기
+                "--disable-blink-features=AutomationControlled",
+                "--window-size=1920,1080",
+            ],
         )
-        page = await browser.new_page()
+        context = await browser.new_context(
+            # 일반 크롬 브라우저처럼 보이게 하는 User-Agent
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/125.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1920, "height": 1080},
+            locale="ko-KR",
+        )
 
-        # 네트워크 응답 가로채기 (GraphQL API 데이터 수집용)
+        # navigator.webdriver 속성 숨기기 (봇 감지 우회)
+        await context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+            Object.defineProperty(navigator, 'languages', { get: () => ['ko-KR', 'ko', 'en-US', 'en'] });
+            window.chrome = { runtime: {} };
+        """)
+
+        page = await context.new_page()
+
+        # 네트워크 응답 가로채기 — URL과 content-type 모두 출력 (디버그용)
         async def on_response(response):
             try:
+                url = response.url
                 ct = response.headers.get("content-type", "")
+                # threads.net 관련 응답만 출력
+                if "threads.net" in url or "instagram.com" in url:
+                    print(f"  [응답] {response.status} | {ct[:40]} | {url[:90]}")
                 if "json" in ct:
                     body = await response.body()
-                    data = json.loads(body)
-                    captured_responses.append({"url": response.url, "data": data})
+                    if body and len(body) > 50:
+                        try:
+                            data = json.loads(body)
+                            captured_responses.append({"url": url, "data": data})
+                        except Exception:
+                            pass
             except Exception:
                 pass
 
@@ -87,18 +121,27 @@ async def _fetch_threads_posts(username):
         try:
             await page.goto(
                 f"https://www.threads.net/@{username}",
-                wait_until="networkidle",
+                wait_until="domcontentloaded",
                 timeout=30000,
             )
+            # JS 렌더링 완료 대기
+            await page.wait_for_timeout(6000)
         except Exception as e:
-            print(f"페이지 로드 오류 (계속 진행): {e}")
+            print(f"페이지 로드 오류 (계속): {e}")
 
-        # JS 렌더링 완료 대기
-        await page.wait_for_timeout(3000)
+        # 진단 정보 출력
+        title = await page.title()
+        current_url = page.url
         html = await page.content()
-        await browser.close()
+        print(f"--- 페이지 진단 ---")
+        print(f"제목: {title}")
+        print(f"URL: {current_url}")
+        print(f"HTML 길이: {len(html)} 자")
+        print(f"HTML 앞 300자: {html[:300]}")
+        print(f"캡처된 JSON 응답 수: {len(captured_responses)}")
+        print(f"-------------------")
 
-    print(f"캡처된 JSON 응답 수: {len(captured_responses)}")
+        await browser.close()
 
     posts = []
 
@@ -109,9 +152,9 @@ async def _fetch_threads_posts(username):
             print(f"응답에서 {len(extracted)}개 게시물 추출: {resp['url'][:80]}")
         posts.extend(extracted)
 
-    # 실패 시 렌더링된 HTML에서 추출 시도
+    # 실패 시 HTML에서 추출
     if not posts:
-        print("HTML 파싱으로 전환...")
+        print("HTML 파싱 시도...")
         posts = _find_posts_in_html(html, username)
 
     # ID 기준 중복 제거
@@ -137,7 +180,6 @@ def _find_posts_in_data(data, username, _depth=0):
             posts.extend(_find_posts_in_data(item, username, _depth + 1))
         return posts
 
-    # thread_items 키가 있으면 게시물 추출
     if "thread_items" in data:
         for item in data.get("thread_items") or []:
             if not isinstance(item, dict):
@@ -170,7 +212,6 @@ def _find_posts_in_data(data, username, _depth=0):
 def _find_posts_in_html(html, username):
     """렌더링된 HTML에서 thread_items JSON 블록 추출"""
     posts = []
-    # thread_items 배열 패턴 탐색
     for match in re.findall(r'"thread_items"\s*:\s*(\[.{20,8000}?\])', html, re.DOTALL)[:10]:
         try:
             items = json.loads(match)
@@ -204,14 +245,12 @@ def _find_posts_in_html(html, username):
 def main():
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 모니터링 시작")
 
-    # 마지막으로 확인한 게시물 ID 로드
     last_seen_id = None
     if os.path.exists(LAST_SEEN_FILE):
         with open(LAST_SEEN_FILE, "r") as f:
             last_seen_id = f.read().strip()
     print(f"마지막 확인 ID: {last_seen_id or '없음'}")
 
-    # Threads 게시물 가져오기
     posts = get_threads_posts(THREADS_USERNAME)
     print(f"가져온 게시물 수: {len(posts)}")
 
@@ -219,7 +258,6 @@ def main():
         print("게시물을 가져오지 못했습니다. 종료.")
         return
 
-    # 새 게시물만 필터링
     new_posts = []
     for post in posts:
         if post["id"] == last_seen_id:
@@ -236,16 +274,14 @@ def main():
 
     print(f"새 게시물 {len(new_posts)}개 발견!")
 
-    # 카카오톡 알림 전송
     access_token = get_kakao_access_token()
 
-    for post in reversed(new_posts):  # 오래된 것부터 전송
+    for post in reversed(new_posts):
         preview = post["text"][:80] + ("..." if len(post["text"]) > 80 else "")
         message = f"📢 @{THREADS_USERNAME} 새 게시물\n\n{preview}\n\n🔗 게시물 보기"
         result = send_kakao_message(access_token, message, post["url"])
         print(f"메시지 전송 결과: {result}")
 
-    # 가장 최신 ID 저장
     with open(LAST_SEEN_FILE, "w") as f:
         f.write(posts[0]["id"])
     print(f"최신 ID 저장: {posts[0]['id']}")
