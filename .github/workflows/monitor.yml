@@ -1,0 +1,40 @@
+name: Threads 모니터링
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'   # 30분마다 실행
+  workflow_dispatch:           # 수동 실행 버튼
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write          # last_seen_id.txt 커밋 권한
+
+    steps:
+      - name: 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 패키지 설치
+        run: pip install -r requirements.txt
+
+      - name: Threads 모니터링 실행
+        env:
+          KAKAO_REST_API_KEY: ${{ secrets.KAKAO_REST_API_KEY }}
+          KAKAO_REFRESH_TOKEN: ${{ secrets.KAKAO_REFRESH_TOKEN }}
+          KAKAO_CLIENT_SECRET: ${{ secrets.KAKAO_CLIENT_SECRET }}
+        run: python monitor.py
+
+      - name: 마지막 확인 ID 저장
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add last_seen_id.txt || true
+          git diff --staged --quiet || git commit -m "chore: update last seen post id"
+          git push || true
