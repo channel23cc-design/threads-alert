@@ -7,6 +7,7 @@ import json
 import requests
 import re
 import sys
+import asyncio
 from datetime import datetime
 
 THREADS_USERNAME = "s_trader91"
@@ -49,139 +50,154 @@ def send_kakao_message(access_token, text, url):
     return response.json()
 
 
-def get_threads_user_id(username):
-    """Threads 유저 이름 → 숫자 ID 변환"""
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 "
-            "Mobile/15E148 Safari/604.1"
-        ),
-        "Accept-Language": "ko-KR,ko;q=0.9",
-    }
-    r = requests.get(f"https://www.threads.net/@{username}", headers=headers, timeout=15)
-    # 페이지 HTML에서 user_id 추출
-    match = re.search(r'"user_id"\s*:\s*"(\d+)"', r.text)
-    if match:
-        return match.group(1)
-    # 두 번째 패턴 시도
-    match = re.search(r'"pk"\s*:\s*"(\d+)"', r.text)
-    if match:
-        return match.group(1)
-    return None
-
-
 def get_threads_posts(username):
-    """최근 게시물 목록 반환 (각 항목: id, text, url, created_at)"""
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 "
-            "Mobile/15E148 Safari/604.1"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "ko-KR,ko;q=0.9",
-        "Cache-Control": "no-cache",
-    }
-
+    """Playwright(실제 브라우저)로 Threads 게시물 가져오기"""
     try:
-        r = requests.get(
-            f"https://www.threads.net/@{username}", headers=headers, timeout=20
-        )
+        return asyncio.run(_fetch_threads_posts(username))
     except Exception as e:
-        print(f"Threads 요청 실패: {e}")
+        print(f"게시물 가져오기 실패: {e}")
         return []
 
-    # 페이지 HTML 안의 JSON 데이터 파싱
-    # Next.js __NEXT_DATA__ 또는 embedded JSON 추출
-    posts = []
 
-    # 방법 1: __SSR_DATA__ 패턴
-    match = re.search(r'__SSR_DATA__\s*=\s*({.+?});\s*</script>', r.text, re.DOTALL)
-    if match:
-        try:
-            data = json.loads(match.group(1))
-            posts = _extract_posts_from_data(data, username)
-        except Exception:
-            pass
+async def _fetch_threads_posts(username):
+    from playwright.async_api import async_playwright
 
-    # 방법 2: require("RelayPrefetchedStreamCache") 패턴
-    if not posts:
-        matches = re.findall(r'\["RelayPrefetchedStreamCache"[^\]]*\]', r.text)
-        for m in matches:
-            try:
-                data = json.loads(m)
-                posts = _extract_posts_from_relay(data, username)
-                if posts:
-                    break
-            except Exception:
-                pass
+    captured_responses = []
 
-    # 방법 3: 페이지 내 JSON 블록 전체 탐색
-    if not posts:
-        json_blocks = re.findall(r'\{[^{}]*"thread_items"[^{}]*\}', r.text)
-        for block in json_blocks[:5]:
-            try:
-                data = json.loads(block)
-                extracted = _extract_from_thread_items(data.get("thread_items", []), username)
-                posts.extend(extracted)
-            except Exception:
-                pass
-
-    return posts
-
-
-def _extract_posts_from_data(data, username):
-    """SSR 데이터에서 게시물 추출"""
-    posts = []
-    try:
-        edges = (
-            data.get("data", {})
-            .get("userData", {})
-            .get("user", {})
-            .get("threads", {})
-            .get("edges", [])
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
         )
-        for edge in edges:
-            items = edge.get("node", {}).get("thread_items", [])
-            posts.extend(_extract_from_thread_items(items, username))
-    except Exception:
-        pass
-    return posts
+        page = await browser.new_page()
 
+        # 네트워크 응답 가로채기 (GraphQL API 데이터 수집용)
+        async def on_response(response):
+            try:
+                ct = response.headers.get("content-type", "")
+                if "json" in ct:
+                    body = await response.body()
+                    data = json.loads(body)
+                    captured_responses.append({"url": response.url, "data": data})
+            except Exception:
+                pass
 
-def _extract_posts_from_relay(data, username):
-    posts = []
-    text = json.dumps(data)
-    items_matches = re.findall(r'"thread_items"\s*:\s*(\[[^\]]+\])', text)
-    for match in items_matches:
+        page.on("response", on_response)
+
         try:
-            items = json.loads(match)
-            posts.extend(_extract_from_thread_items(items, username))
-        except Exception:
-            pass
-    return posts
+            await page.goto(
+                f"https://www.threads.net/@{username}",
+                wait_until="networkidle",
+                timeout=30000,
+            )
+        except Exception as e:
+            print(f"페이지 로드 오류 (계속 진행): {e}")
 
+        # JS 렌더링 완료 대기
+        await page.wait_for_timeout(3000)
+        html = await page.content()
+        await browser.close()
 
-def _extract_from_thread_items(items, username):
+    print(f"캡처된 JSON 응답 수: {len(captured_responses)}")
+
     posts = []
-    for item in items:
-        try:
-            post = item.get("post", {})
-            pk = str(post.get("pk", "") or post.get("id", ""))
-            caption = post.get("caption", {})
+
+    # 캡처된 API 응답에서 게시물 추출
+    for resp in captured_responses:
+        extracted = _find_posts_in_data(resp["data"], username)
+        if extracted:
+            print(f"응답에서 {len(extracted)}개 게시물 추출: {resp['url'][:80]}")
+        posts.extend(extracted)
+
+    # 실패 시 렌더링된 HTML에서 추출 시도
+    if not posts:
+        print("HTML 파싱으로 전환...")
+        posts = _find_posts_in_html(html, username)
+
+    # ID 기준 중복 제거
+    seen_ids = set()
+    unique_posts = []
+    for post in posts:
+        if post["id"] not in seen_ids:
+            seen_ids.add(post["id"])
+            unique_posts.append(post)
+
+    return unique_posts
+
+
+def _find_posts_in_data(data, username, _depth=0):
+    """JSON 데이터를 재귀 탐색하여 thread_items 패턴 추출"""
+    if _depth > 12 or not isinstance(data, (dict, list)):
+        return []
+
+    posts = []
+
+    if isinstance(data, list):
+        for item in data:
+            posts.extend(_find_posts_in_data(item, username, _depth + 1))
+        return posts
+
+    # thread_items 키가 있으면 게시물 추출
+    if "thread_items" in data:
+        for item in data.get("thread_items") or []:
+            if not isinstance(item, dict):
+                continue
+            post_data = item.get("post", {})
+            pk = str(post_data.get("pk", "") or post_data.get("id", ""))
+            caption = post_data.get("caption", {})
             text = caption.get("text", "") if isinstance(caption, dict) else ""
-            code = post.get("code", "")
-            taken_at = post.get("taken_at", 0)
+            code = post_data.get("code", "")
+            taken_at = post_data.get("taken_at", 0)
             if pk and text:
                 posts.append({
                     "id": pk,
                     "text": text,
-                    "url": f"https://www.threads.net/@{username}/post/{code}" if code else f"https://www.threads.net/@{username}",
+                    "url": (
+                        f"https://www.threads.net/@{username}/post/{code}"
+                        if code
+                        else f"https://www.threads.net/@{username}"
+                    ),
                     "created_at": taken_at,
                 })
+
+    for val in data.values():
+        if isinstance(val, (dict, list)):
+            posts.extend(_find_posts_in_data(val, username, _depth + 1))
+
+    return posts
+
+
+def _find_posts_in_html(html, username):
+    """렌더링된 HTML에서 thread_items JSON 블록 추출"""
+    posts = []
+    # thread_items 배열 패턴 탐색
+    for match in re.findall(r'"thread_items"\s*:\s*(\[.{20,8000}?\])', html, re.DOTALL)[:10]:
+        try:
+            items = json.loads(match)
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                post_data = item.get("post", {})
+                pk = str(post_data.get("pk", "") or post_data.get("id", ""))
+                caption = post_data.get("caption", {})
+                text = caption.get("text", "") if isinstance(caption, dict) else ""
+                code = post_data.get("code", "")
+                taken_at = post_data.get("taken_at", 0)
+                if pk and text:
+                    posts.append({
+                        "id": pk,
+                        "text": text,
+                        "url": (
+                            f"https://www.threads.net/@{username}/post/{code}"
+                            if code
+                            else f"https://www.threads.net/@{username}"
+                        ),
+                        "created_at": taken_at,
+                    })
         except Exception:
-            continue
+            pass
+        if posts:
+            break
     return posts
 
 
@@ -203,7 +219,7 @@ def main():
         print("게시물을 가져오지 못했습니다. 종료.")
         return
 
-    # 새 게시물만 필터링 (ID가 last_seen_id 이전까지)
+    # 새 게시물만 필터링
     new_posts = []
     for post in posts:
         if post["id"] == last_seen_id:
@@ -212,7 +228,6 @@ def main():
 
     if not new_posts:
         print("새 게시물 없음")
-        # 최신 ID 저장 (첫 실행 시)
         if not last_seen_id:
             with open(LAST_SEEN_FILE, "w") as f:
                 f.write(posts[0]["id"])

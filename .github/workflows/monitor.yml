@@ -24,6 +24,9 @@ jobs:
       - name: 패키지 설치
         run: pip install -r requirements.txt
 
+      - name: Playwright 브라우저 설치
+        run: python -m playwright install chromium --with-deps
+
       - name: Threads 모니터링 실행
         env:
           KAKAO_REST_API_KEY: ${{ secrets.KAKAO_REST_API_KEY }}
