@@ -71,13 +71,11 @@ async def _fetch_threads_posts(username):
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
                 "--disable-gpu",
-                # 봇 감지 우회: webdriver 플래그 숨기기
                 "--disable-blink-features=AutomationControlled",
                 "--window-size=1920,1080",
             ],
         )
         context = await browser.new_context(
-            # 일반 크롬 브라우저처럼 보이게 하는 User-Agent
             user_agent=(
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -97,20 +95,16 @@ async def _fetch_threads_posts(username):
 
         page = await context.new_page()
 
-        # 네트워크 응답 가로채기 — URL과 content-type 모두 출력 (디버그용)
+        # GraphQL API 응답 가로채기
         async def on_response(response):
             try:
-                url = response.url
                 ct = response.headers.get("content-type", "")
-                # threads.net 관련 응답만 출력
-                if "threads.net" in url or "threads.com" in url or "instagram.com" in url:
-                    print(f"  [응답] {response.status} | {ct[:40]} | {url[:90]}")
                 if "json" in ct:
                     body = await response.body()
                     if body and len(body) > 50:
                         try:
                             data = json.loads(body)
-                            captured_responses.append({"url": url, "data": data})
+                            captured_responses.append({"url": response.url, "data": data})
                         except Exception:
                             pass
             except Exception:
@@ -124,32 +118,23 @@ async def _fetch_threads_posts(username):
                 wait_until="domcontentloaded",
                 timeout=30000,
             )
-            # JS 렌더링 완료 대기
+            # JavaScript 실행 및 GraphQL 호출 완료 대기
             await page.wait_for_timeout(6000)
         except Exception as e:
             print(f"페이지 로드 오류 (계속): {e}")
 
-        # 진단 정보 출력
-        title = await page.title()
-        current_url = page.url
         html = await page.content()
-        print(f"--- 페이지 진단 ---")
-        print(f"제목: {title}")
-        print(f"URL: {current_url}")
-        print(f"HTML 길이: {len(html)} 자")
-        print(f"HTML 앞 300자: {html[:300]}")
-        print(f"캡처된 JSON 응답 수: {len(captured_responses)}")
-        print(f"-------------------")
-
         await browser.close()
+
+    print(f"캡처된 JSON 응답 수: {len(captured_responses)}")
 
     posts = []
 
-    # 캡처된 API 응답에서 게시물 추출
+    # GraphQL 응답에서 게시물 추출
     for resp in captured_responses:
         extracted = _find_posts_in_data(resp["data"], username)
         if extracted:
-            print(f"응답에서 {len(extracted)}개 게시물 추출: {resp['url'][:80]}")
+            print(f"응답에서 {len(extracted)}개 게시물 추출")
         posts.extend(extracted)
 
     # 실패 시 HTML에서 추출
@@ -245,12 +230,14 @@ def _find_posts_in_html(html, username):
 def main():
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 모니터링 시작")
 
+    # 마지막으로 확인한 게시물 ID 로드
     last_seen_id = None
     if os.path.exists(LAST_SEEN_FILE):
         with open(LAST_SEEN_FILE, "r") as f:
             last_seen_id = f.read().strip()
     print(f"마지막 확인 ID: {last_seen_id or '없음'}")
 
+    # Threads 게시물 가져오기
     posts = get_threads_posts(THREADS_USERNAME)
     print(f"가져온 게시물 수: {len(posts)}")
 
@@ -258,6 +245,15 @@ def main():
         print("게시물을 가져오지 못했습니다. 종료.")
         return
 
+    # 첫 실행: 과거 게시물을 모두 보내지 않고 기준점만 저장
+    if not last_seen_id:
+        with open(LAST_SEEN_FILE, "w") as f:
+            f.write(posts[0]["id"])
+        print(f"첫 실행 완료 - 기준 ID 저장: {posts[0]['id']}")
+        print("다음 실행부터 새 게시물 알림이 시작됩니다.")
+        return
+
+    # 새 게시물만 필터링 (마지막 확인 ID 이후의 것만)
     new_posts = []
     for post in posts:
         if post["id"] == last_seen_id:
@@ -266,22 +262,20 @@ def main():
 
     if not new_posts:
         print("새 게시물 없음")
-        if not last_seen_id:
-            with open(LAST_SEEN_FILE, "w") as f:
-                f.write(posts[0]["id"])
-            print(f"첫 실행 - 기준 ID 저장: {posts[0]['id']}")
         return
 
     print(f"새 게시물 {len(new_posts)}개 발견!")
 
+    # 카카오톡 알림 전송
     access_token = get_kakao_access_token()
 
-    for post in reversed(new_posts):
+    for post in reversed(new_posts):  # 오래된 것부터 전송
         preview = post["text"][:80] + ("..." if len(post["text"]) > 80 else "")
         message = f"📢 @{THREADS_USERNAME} 새 게시물\n\n{preview}\n\n🔗 게시물 보기"
         result = send_kakao_message(access_token, message, post["url"])
         print(f"메시지 전송 결과: {result}")
 
+    # 가장 최신 ID 저장
     with open(LAST_SEEN_FILE, "w") as f:
         f.write(posts[0]["id"])
     print(f"최신 ID 저장: {posts[0]['id']}")
