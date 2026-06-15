@@ -14,6 +14,7 @@ THREADS_USERNAME = "s_trader91"
 KAKAO_REST_API_KEY = os.environ["KAKAO_REST_API_KEY"]
 KAKAO_REFRESH_TOKEN = os.environ["KAKAO_REFRESH_TOKEN"]
 KAKAO_CLIENT_SECRET = os.environ["KAKAO_CLIENT_SECRET"]
+THREADS_COOKIES = os.environ.get("THREADS_COOKIES", "")  # 로그인 쿠키 (선택)
 LAST_SEEN_FILE = "last_seen_id.txt"
 
 
@@ -92,6 +93,27 @@ async def _fetch_threads_posts(username):
             Object.defineProperty(navigator, 'languages', { get: () => ['ko-KR', 'ko', 'en-US', 'en'] });
             window.chrome = { runtime: {} };
         """)
+
+        # Threads 로그인 쿠키 주입
+        if THREADS_COOKIES:
+            try:
+                raw_cookies = json.loads(THREADS_COOKIES)
+                cookies = [
+                    {
+                        "name": c["name"],
+                        "value": c["value"],
+                        "domain": c.get("domain", ".threads.com"),
+                        "path": c.get("path", "/"),
+                    }
+                    for c in raw_cookies
+                    if c.get("name") and c.get("value")
+                ]
+                await context.add_cookies(cookies)
+                print(f"로그인 쿠키 {len(cookies)}개 로드 완료")
+            except Exception as e:
+                print(f"쿠키 로드 실패: {e}")
+        else:
+            print("경고: THREADS_COOKIES 없음 — 비로그인 상태로 시도")
 
         page = await context.new_page()
 
