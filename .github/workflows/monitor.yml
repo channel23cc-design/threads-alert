@@ -1,9 +1,7 @@
 name: Threads 모니터링
 
 on:
-  schedule:
-    - cron: '*/30 * * * *'   # 30분마다 실행
-  workflow_dispatch:           # 수동 실행 버튼
+  workflow_dispatch:           # 수동 실행 버튼만 남김 (자동 실행 중단)
 
 jobs:
   check:
